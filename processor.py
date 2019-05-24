@@ -1,235 +1,243 @@
 import os
 import sys
 import time
-import pickle
-from config import *
+import config
+import logging
+from typing import TextIO
+from checkpoint import Checkpoint
 
 
-# Checkpoint: data to load and save to record file
-class Checkpoint:
+class Processor(object):
+    """Class for processing dump files from postgresql."""
+    MILLION = 1024 * 1024
+
     def __init__(self):
-        self.processed_files = set()
-        self.store_file_index = {p: 1 for p in protocol_set}
-        self.packet_index = {p: 0 for p in protocol_set}
-        self.current_file = ''
-        self.offset = 0
+        self.bytes_count = 0
+        self.start_time = 0.0
+        self.out_files = {}
+        self.checkpoint = Checkpoint(config.VALUE_SET)
+        self.init_time()
 
-    def get_file_name(self, protocol: str):
-        """Get name of file of storage.
-        format: [out_dir]/[protocol]_[store_file_index].csv
+    def init_time(self):
+        """Init time."""
 
-        :param protocol: str, name of protocol
-        :return:
+        self.start_time = time.time()
+
+    def add_bytes_count(self, count: int):
+        """Add up bytes count."""
+
+        self.bytes_count += count
+
+    def split_if_necessary(self) -> None:
+        """Check size of each storage file, called each batch
+        close and open a new one to store if size exceeds max_split_size
         """
 
-        index = self.store_file_index[protocol]
-        prefix = os.path.join(out_dir, protocol.replace('/', '-'))
-        return '{}_{}.csv'.format(prefix, index)
+        # Convert MB to Byte
+        for v in config.VALUE_SET:
+            file_size = self.out_files[v].tell()
+            if file_size >= config.FILE_SPLIT_SIZE:
+                self.checkpoint.update_file_index(v)
+                new_file = self.checkpoint.get_file_name(v, config.OUT_DIR)
+                self.out_files[v].close()
+                self.out_files[v] = open(new_file, 'a')
+                logging.info('File size grows over {:.2f} MB, '
+                             'store in new file `{}`...'
+                             .format(config.FILE_SPLIT_SIZE / self.MILLION,
+                                     new_file))
 
-    def save(self):
-        """Dump checkpoint data to file."""
-        with open(record_file, 'wb') as f:
-            pickle.dump(self, f)
-        print('Checkpoint saved in `{}`.'.format(record_file))
+    def process_line(self, line: str) -> None:
+        """Process each line, including verifying validness of
+         group by attribute, check if packet is recorded, and record packet.
 
-    def load(self):
-        """Load checkpoint data from file."""
-        with open(record_file, 'rb') as f:
-            temp: Checkpoint = pickle.load(f)
-        self.processed_files = temp.processed_files
-        self.store_file_index = temp.store_file_index
-        self.packet_index = temp.packet_index
-        self.current_file = temp.current_file
-        self.offset = temp.offset
-        print('Checkpoint loaded from `{}`.'.format(record_file))
+        :param line: str, line to process ('\n' not included)
+        """
 
-
-def split_if_necessary() -> None:
-    """Check size of each storage file, called each batch
-    close and open a new one to store if size exceeds max_split_size
-    """
-
-    global checkpoint, out_files
-    for p in protocol_set:
-        file_size = out_files[p].tell()
-        if file_size >= file_split_size:
-            checkpoint.store_file_index[p] += 1
-            out_files[p].close()
-            new_name = checkpoint.get_file_name(p)
-            out_files[p] = open(new_name, 'a')
-            print('File size grows over {:.2f} Mb, store in new file `{}`...'
-                  .format(file_split_size / 1e6, new_name))
-
-
-def process_line(line: str or bytes) -> None:
-    """Process each line, including verifying validness of packet,
-     check if packet is recorded, and record packet.
-
-    :param line: str or bytes, line to process ('\n' included)
-    """
-
-    # Convert from bytes to str if needed
-    if isinstance(line, bytes):
-        line = str(line, 'utf-8')
-    items = line.split('\t')
-    # Check item count
-    if len(items) != 14:
-        return
-    # Check protocol
-    protocol = items[7]
-    if protocol not in protocol_set:
-        return
-    protocol = items[7]
-    # Check validness of packet_id
-    try:
-        packet_id = int(items[0])
-    except ValueError:
-        return
-    # Check if packet is already parsed and recorded
-    if protocol in checkpoint.packet_index:
-        if packet_id <= checkpoint.packet_index[protocol]:
+        attributes = line.split('\t')
+        # Check value in values to group by
+        value = attributes[config.GROUP_BY_ATTR_INDEX]
+        if value not in config.VALUE_SET:
             return
-    # Remove needless parts: data, parse_time, create_time, length
-    # Delete from back to front will prevent index mistakes
-    del items[11:]
-    del items[8]
-    # Write to related file
-    out_files[protocol].write('\t'.join(items))
-    out_files[protocol].write('\n')
-    # Update index
-    checkpoint.packet_index[protocol] = packet_id
+        row_count = int(attributes[config.INDEX_ROW_COUNT])
+        # Check if packet is already parsed and recorded
+        if row_count <= self.checkpoint.row_count[value]:
+            return
+        # Keep attributes we're interested in
+        data = [attributes[i] for i in config.RECORD_ATTR_INDEX_LIST]
+        # Write to related file
+        self.out_files[value].write('\t'.join(data))
+        self.out_files[value].write('\n')
+        # Update index
+        self.checkpoint.row_count[value] = row_count
 
+    @staticmethod
+    def verify_file_schema(fp: TextIO) -> bool:
+        """Verify the schema of data contained in file.
+        The dump files of postgresql should contain exactly one table each.
+        """
 
-def process_file(filename: str, is_old_file: bool = False):
-    """Process a text file (ends with '.dat') or gzip file (ends with .gz).
+        line = fp.readline()
+        # Remember to return head of file
+        fp.seek(0)
+        if isinstance(line, bytes):
+            line = str(line, encoding='utf-8')
+        # Remove empty cells
+        attributes = list(filter(None, line.split('\t')))
+        # Check attribute count
+        if len(attributes) != config.ATTR_COUNT:
+            return False
+        # Check validness of index attribute
+        try:
+            _ = int(attributes[config.INDEX_ROW_COUNT])
+        except ValueError:
+            return False
+        return True
 
-    :param filename: str, name of file to process
-    :param is_old_file: bool, whether this file has been processed before
-            if it has been, we should skip batches already read.
-    :return: int, 0 if this file is ignored or 1 if processed
-    """
+    def process_file(self, filename: str, is_old_file: bool = False) -> None:
+        """Process a text file (ends with '.dat') or gzip file (ends with .gz).
 
-    # Check file type
-    file_type = filename[filename.rfind('.'):]
-    if file_type not in open_funcs:
-        print('Fail to process `{}`, unsupported file type.'.format(filename))
-        return
-    # Open file according to its type
-    f = open_funcs[file_type](filename)
+        :param filename: str, name of file to process
+        :param is_old_file: bool, whether this file has been processed before
+                if it has been, we should skip batches already read.
+        :return: int, 0 if this file is ignored or 1 if processed
+        """
 
-    global start_time, bytes_count
-    # Large old file: needs to recover to the starting point
-    if is_old_file:
-        f.seek(checkpoint.offset)
-        print('Time for loading: {:.2f} s'.format(time.time() - start_time))
-        start_time = time.time()  # This should be the start of processing
-    else:
-        # Record current file
-        checkpoint.current_file = filename
+        # Check file type
+        file_type = filename[filename.rfind('.'):]
+        if file_type not in config.OPEN_FUNCS:
+            logging.info('Fail to process `{}`: unsupported file type.'
+                         .format(filename))
+            return
+        # Open file according to its type
+        fp = config.OPEN_FUNCS[file_type](filename)
 
-    print('Start processing `{}`...'.format(filename))
-    while True:
-        checkpoint.offset = f.tell()
-        batch = f.read(batch_size)
-        # EOF
-        line = f.readline()
-        if line:
-            batch += line
-        if not batch:
-            break
-        # Parse batch
-        _ = [process_line(line) for line in batch.splitlines()]
-        bytes_count += len(batch)
-        # Split large files and change storage to new files
-        split_if_necessary()
-    f.close()
+        # Old file: needs to recover to the starting point
+        if is_old_file and self.checkpoint.offset > 0:
+            fp.seek(self.checkpoint.offset)
+            logging.info('Time for seeking file offset: {:.2f} s'
+                         .format(time.time() - self.start_time))
+            # This should be the start of processing
+            self.init_time()
+        else:
+            # New files:
+            # needs to verify whether this file contains the table we want
+            if not self.verify_file_schema(fp):
+                logging.info('Schema of `{}` doesn\'t fit; skip.'
+                             .format(filename))
+                fp.close()
+                return
+            # Record current file
+            self.checkpoint.current_file = filename
 
+        logging.info('Start processing `{}`...'.format(filename))
+        while True:
+            self.checkpoint.offset = fp.tell()
+            batch = fp.read(config.BATCH_SIZE)
+            # EOF
+            line = fp.readline()
+            if line:
+                batch += line
+            if not batch:
+                break
+            # Convert from bytes to str if needed
+            if isinstance(batch, bytes):
+                batch = str(batch, 'utf-8')
+            # Parse batch
+            for line in batch.splitlines():
+                self.process_line(line)
+            self.add_bytes_count(len(batch))
+            # Split large files and change storage to new files
+            if config.SPLIT:
+                self.split_if_necessary()
+        fp.close()
 
-def process_dir(dirname: str):
-    """Recursively process files in given directory.
+    def process_dir(self, dirname: str) -> None:
+        """Recursively process files in given directory.
 
-    :param dirname: str, directory of files to precess
-    :return: number of files processed under this directory
-    """
+        :param dirname: str, directory of files to precess
+        :return: number of files processed under this directory
+        """
 
-    file_list = sorted(os.listdir(dirname))
-    for name in file_list:
-        # Full name of file
-        name = os.path.join(dirname, name)
-        # Check if this file is already processed
-        if name in checkpoint.processed_files:
-            continue
-        if os.path.isfile(name):
-            process_file(name)
-            checkpoint.processed_files.add(name)
-        elif os.path.isdir(name) and recursive:
-            process_dir(name)
+        file_list = sorted(os.listdir(dirname))
+        for name in file_list:
+            # Full name of file
+            name = os.path.join(dirname, name)
+            # Check if this file is already processed
+            if name in self.checkpoint.processed_files:
+                continue
+            if os.path.isfile(name):
+                self.process_file(name)
+                self.checkpoint.processed_files.add(name)
+            elif os.path.isdir(name) and config.RECURSIVE:
+                self.process_dir(name)
 
+    def before_process(self) -> None:
+        """Create directory if needed, and load records."""
+        if not os.path.isdir(config.OUT_DIR):
+            os.mkdir(config.OUT_DIR)
+        # Load checkpoints from file
+        if os.path.exists(config.RECORD_FILE):
+            self.checkpoint.load(config.RECORD_FILE)
+            logging.info('Checkpoint loaded from `{}`.'
+                         .format(config.RECORD_FILE))
+        # Open files to write
+        self.out_files = {
+            v: open(self.checkpoint.get_file_name(v, config.OUT_DIR), 'a')
+            for v in config.VALUE_SET
+        }
 
-def before_process() -> None:
-    """Create directory if needed, and load records."""
-    global start_time, bytes_count
-    start_time = time.time()
-    bytes_count = 0
-    if not os.path.isdir(out_dir):
-        os.mkdir(out_dir)
-    # Load checkpoints from file
-    if os.path.exists(record_file):
-        checkpoint.load()
-    # Open files to write
-    global out_files
-    out_files = {p: open(checkpoint.get_file_name(p), 'a')
-                 for p in protocol_set}
+    def after_process(self, is_interrupted: bool) -> None:
+        """Deal with opened files, useless files and save records."""
+        # Close files, and remove files with zero size
+        for file in self.out_files.values():
+            file.close()
+            if os.path.getsize(file.name) == 0:
+                os.remove(file.name)
+        # Handle interrupts
+        if is_interrupted:
+            self.checkpoint.save(config.RECORD_FILE)
+            logging.info('Checkpoint saved in `{}`.'.format(config.RECORD_FILE))
+        # Normal ending, remove record file
+        elif os.path.exists(config.RECORD_FILE):
+            os.remove(config.RECORD_FILE)
+        # Analyse speed
+        total_mb = self.bytes_count / self.MILLION
+        total_time = time.time() - self.start_time
+        avg_speed = total_mb / total_time
+        logging.info('Processed {:.2f} MB in {:.2f} s, {:.2f} MB/s on average.'
+                     .format(total_mb, total_time, avg_speed))
+        exit(int(is_interrupted))
 
-
-def after_process(is_interrupted: bool) -> None:
-    """Deal with opened files, useless files and save records."""
-    # Close files, and remove files with zero size
-    for file in out_files.values():
-        file.close()
-        if os.path.getsize(file.name) == 0:
-            os.remove(file.name)
-    # Handle interrupts
-    if is_interrupted:
-        checkpoint.save()
-    # Normal ending, remove record file
-    elif os.path.exists(record_file):
-        os.remove(record_file)
-    global start_time, bytes_count
-    print('Processed {:.2f} Mb in {:.2f} s.'
-          .format(bytes_count / 1e6, time.time() - start_time))
-    exit(int(is_interrupted))
+    def process(self, dir_list: list) -> None:
+        """Process list of directories / files"""
+        try:
+            # Prepare for processing
+            self.before_process()
+            # Recover from file processed last time
+            if os.path.exists(self.checkpoint.current_file):
+                logging.info('Reloading `{}` from last checkpoints...'
+                             .format(self.checkpoint.current_file))
+                self.process_file(self.checkpoint.current_file,
+                                  is_old_file=True)
+            if len(dir_list) == 0:
+                logging.error(
+                    'Please specify at least one directory or file to process.')
+            # Process each directory / file
+            for dir_name in dir_list:
+                if os.path.isdir(dir_name):
+                    self.process_dir(dir_name)
+                elif os.path.isfile(dir_name):
+                    self.process_file(dir_name)
+                else:
+                    logging.warning('`{}` is not a directory / file; skip.'
+                                    .format(dir_name))
+        except KeyboardInterrupt:
+            self.after_process(is_interrupted=True)
+        else:
+            self.after_process(is_interrupted=False)
 
 
 if __name__ == '__main__':
-    # Runtime globals, used for processing
-    bytes_count = 0
-    start_time = 0.0
-    out_files = {}
-    checkpoint = Checkpoint()
-
-    try:
-        # Prepare for processing
-        before_process()
-        # Recover from file processed last time
-        if os.path.exists(checkpoint.current_file):
-            print('Reloading `{}` from last checkpoints...'
-                  .format(checkpoint.current_file))
-            process_file(checkpoint.current_file, is_old_file=True)
-        # Process command files
-        dir_list = sys.argv[1:]
-        if len(dir_list) == 0:
-            print('Please specify at least one directory or file to parse.')
-        # Process each directory / file
-        for dir_name in dir_list:
-            if os.path.isdir(dir_name):
-                process_dir(dir_name)
-            elif os.path.isfile(dir_name):
-                process_file(dir_name)
-            else:
-                print('`{}` is not a valid directory / file; '
-                      'skipped.'.format(dir_name))
-    except KeyboardInterrupt as e:
-        after_process(is_interrupted=True)
-    else:
-        after_process(is_interrupted=False)
+    logging.basicConfig(level=logging.INFO)
+    p = Processor()
+    p.process(sys.argv[1:])
