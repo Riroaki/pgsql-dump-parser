@@ -17,7 +17,17 @@ VALUE_SET = {'DNP3', 'ENIP', 'CIP', 'IEC104', 'IEC61850/GOOSE',
 INDEX_ROW_COUNT = 0  # This means the 0 column records row index
 
 # Index of attributes you want to record
-RECORD_ATTR_INDEX_LIST = [1, 2, 3, 4, 5, 6, 7, 9, 10]
+RECORD_ATTR_DICT = {
+    # attribute name : attribute (cloumn) index
+    'src_mac': 1,
+    'src_ip': 2,
+    'src_port': 3,
+    'dst_mac': 4,
+    'dst_ip': 5,
+    'dst_port': 6,
+    'content': 9,
+    'time': 10
+}
 
 # File or directories
 RECORD_FILE = 'rec'
@@ -38,3 +48,8 @@ OPEN_FUNCS = {
     '.dat': partial(open, mode='r')
     # You can add more types of file extensions and its openers
 }
+
+# DO NOT CHANGE THIS PART:
+# Split the dict into names and indices
+RECORD_ATTR_LIST = RECORD_ATTR_DICT.keys()
+RECORD_ATTR_INDEX_LIST = RECORD_ATTR_DICT.values()

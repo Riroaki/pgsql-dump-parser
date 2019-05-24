@@ -38,13 +38,15 @@ class Processor(object):
             file_size = self.out_files[v].tell()
             if file_size >= config.FILE_SPLIT_SIZE:
                 self.checkpoint.update_file_index(v)
-                new_file = self.checkpoint.get_file_name(v, config.OUT_DIR)
+                new_file = open(
+                    self.checkpoint.get_file_name(v, config.OUT_DIR), 'a')
+                self.add_table_head(new_file)
                 self.out_files[v].close()
-                self.out_files[v] = open(new_file, 'a')
+                self.out_files[v] = new_file
                 logging.info('File size grows over {:.2f} MB, '
                              'store in new file `{}`...'
                              .format(config.FILE_SPLIT_SIZE / self.MILLION,
-                                     new_file))
+                                     new_file.name))
 
     def process_line(self, line: str) -> None:
         """Process each line, including verifying validness of
@@ -92,6 +94,13 @@ class Processor(object):
         except ValueError:
             return False
         return True
+
+    @staticmethod
+    def add_table_head(f: TextIO) -> None:
+        """Add headings of table."""
+
+        f.write('\t'.join(config.RECORD_ATTR_LIST))
+        f.write('\n')
 
     def process_file(self, filename: str, is_old_file: bool = False) -> None:
         """Process a text file (ends with '.dat') or gzip file (ends with .gz).
@@ -181,17 +190,21 @@ class Processor(object):
             logging.info('Checkpoint loaded from `{}`.'
                          .format(config.RECORD_FILE))
         # Open files to write
-        self.out_files = {
-            v: open(self.checkpoint.get_file_name(v, config.OUT_DIR), 'a')
-            for v in config.VALUE_SET
-        }
+        for v in config.VALUE_SET:
+            f = open(self.checkpoint.get_file_name(v, config.OUT_DIR), 'a')
+            # If it's a new file, add headings
+            if f.tell() == 0:
+                self.add_table_head(f)
+            self.out_files[v] = f
 
     def after_process(self, is_interrupted: bool) -> None:
         """Deal with opened files, useless files and save records."""
-        # Close files, and remove files with zero size
+        # Close files, and remove files with zero contents
+        head_len = len('\t'.join(config.RECORD_ATTR_LIST)) + 1
         for file in self.out_files.values():
             file.close()
-            if os.path.getsize(file.name) == 0:
+            # Not strictly compare size
+            if os.path.getsize(file.name) <= head_len + 100:
                 os.remove(file.name)
         # Handle interrupts
         if is_interrupted:
