@@ -74,8 +74,8 @@ class Processor(object):
             # Update index
             self.checkpoint.row_count[value] = row_count
         except Exception as e:
-            print(e)
-            print("Invalid row: {}".format(attributes))
+            logging.warning(e)
+            logging.warning("Invalid row: {}".format(attributes))
 
     @staticmethod
     def verify_file_schema(fp: TextIO) -> bool:
@@ -202,30 +202,6 @@ class Processor(object):
                 self.add_table_head(f)
             self.out_files[v] = f
 
-    def after_process(self, is_interrupted: bool) -> None:
-        """Deal with opened files, useless files and save records."""
-        # Close files, and remove files with zero contents
-        head_len = len('\t'.join(config.RECORD_ATTR_LIST)) + 1
-        for file in self.out_files.values():
-            file.close()
-            # Not strictly compare size
-            if os.path.getsize(file.name) <= head_len + 100:
-                os.remove(file.name)
-        # Handle interrupts
-        if is_interrupted:
-            self.checkpoint.save(config.RECORD_FILE)
-            logging.info('Checkpoint saved in `{}`.'.format(config.RECORD_FILE))
-        # Normal ending, remove record file
-        elif os.path.exists(config.RECORD_FILE):
-            os.remove(config.RECORD_FILE)
-        # Analyse speed
-        total_mb = self.bytes_count / self.MILLION
-        total_time = time.time() - self.start_time
-        avg_speed = total_mb / total_time
-        logging.info('Processed {:.2f} MB in {:.2f} s, {:.2f} MB/s on average.'
-                     .format(total_mb, total_time, avg_speed))
-        exit(int(is_interrupted))
-
     def process(self, dir_list: list) -> None:
         """Process list of directories / files"""
         try:
@@ -254,10 +230,34 @@ class Processor(object):
             self.after_process(is_interrupted=True)
         # Other unknown exceptions...
         except Exception as e:
-            print(e)
+            logging.warning(e)
             self.after_process(is_interrupted=True)
         else:
             self.after_process(is_interrupted=False)
+
+    def after_process(self, is_interrupted: bool) -> None:
+        """Deal with opened files, useless files and save records."""
+        # Close files, and remove files with zero contents
+        head_len = len('\t'.join(config.RECORD_ATTR_LIST)) + 1
+        for file in self.out_files.values():
+            file.close()
+            # Not strictly compare size
+            if os.path.getsize(file.name) <= head_len + 100:
+                os.remove(file.name)
+        # Handle interrupts
+        if is_interrupted:
+            self.checkpoint.save(config.RECORD_FILE)
+            logging.info('Checkpoint saved in `{}`.'.format(config.RECORD_FILE))
+        # Normal ending, remove record file
+        elif os.path.exists(config.RECORD_FILE):
+            os.remove(config.RECORD_FILE)
+        # Analyse speed
+        total_mb = self.bytes_count / self.MILLION
+        total_time = time.time() - self.start_time
+        avg_speed = total_mb / total_time
+        logging.info('Processed {:.2f} MB in {:.2f} s, {:.2f} MB/s on average.'
+                     .format(total_mb, total_time, avg_speed))
+        exit(int(is_interrupted))
 
 
 if __name__ == '__main__':
