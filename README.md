@@ -15,7 +15,7 @@ pgdump文件解析脚本，从数据库大文件（.gz，.dat，……）导出�
 
 ### 使用方法
 
-`python3 process.py [./data1/] [.data2/] [.data.txt] [...]`
+`python3 process.py [./data1/] [./data2/] [.data.txt] [...]`
 
 支持多个文件/目录混合处理。
 
@@ -45,3 +45,8 @@ pgdump文件解析脚本，从数据库大文件（.gz，.dat，……）导出�
 断点恢复：
 
 ![](screenshots/recover.png)
+
+### 更新记录
+
+- 2019年5月24日：完成第一版基本功能
+- 2019年5月28日：提高了对未知错误和非规范数据处理的鲁棒性

@@ -49,32 +49,37 @@ class Processor(object):
                                      new_file.name))
 
     def process_line(self, line: str) -> None:
-        """Process each line, including verifying validness of
-         group by attribute, check if packet is recorded, and record packet.
+        """Process each line, does NOT verify the validness of
+         lines (print them and ignores invalid ones without terminating)
+         check if this line is recorded, and record the line.
 
         :param line: str, line to process ('\n' not included)
         """
 
         attributes = line.split('\t')
-        # Check value in values to group by
-        value = attributes[config.GROUP_BY_ATTR_INDEX]
-        if value not in config.VALUE_SET:
-            return
-        row_count = int(attributes[config.INDEX_ROW_COUNT])
-        # Check if packet is already parsed and recorded
-        if row_count <= self.checkpoint.row_count[value]:
-            return
-        # Keep attributes we're interested in
-        data = [attributes[i] for i in config.RECORD_ATTR_INDEX_LIST]
-        # Write to related file
-        self.out_files[value].write('\t'.join(data))
-        self.out_files[value].write('\n')
-        # Update index
-        self.checkpoint.row_count[value] = row_count
+        try:
+            # Check value in values to group by
+            value = attributes[config.GROUP_BY_ATTR_INDEX]
+            if value not in config.VALUE_SET:
+                return
+            row_count = int(attributes[config.INDEX_ROW_COUNT])
+            # Check if line is already parsed and recorded
+            if row_count <= self.checkpoint.row_count[value]:
+                return
+            # Keep attributes we're interested in
+            data = [attributes[i] for i in config.RECORD_ATTR_INDEX_LIST]
+            # Write to related file
+            self.out_files[value].write('\t'.join(data))
+            self.out_files[value].write('\n')
+            # Update index
+            self.checkpoint.row_count[value] = row_count
+        except Exception as e:
+            print(e)
+            print("Invalid row: {}".format(attributes))
 
     @staticmethod
     def verify_file_schema(fp: TextIO) -> bool:
-        """Verify the schema of data contained in file.
+        """Verify the schema of data contained in a file.
         The dump files of postgresql should contain exactly one table each.
         """
 
@@ -244,7 +249,12 @@ class Processor(object):
                 else:
                     logging.warning('`{}` is not a directory / file; skip.'
                                     .format(dir_name))
+        # Ctrl + C manually stopped
         except KeyboardInterrupt:
+            self.after_process(is_interrupted=True)
+        # Other unknown exceptions...
+        except Exception as e:
+            print(e)
             self.after_process(is_interrupted=True)
         else:
             self.after_process(is_interrupted=False)
